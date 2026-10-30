@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 凭据与运行时产物
+.trae_token_cache.json
+
+# 备份文件（审计留痕，不入版本库）
+*.bak_*
