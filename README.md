@@ -26,8 +26,10 @@ python trae-jwt-refresh/scripts/refresh_trae_jwt.py --threshold 5 accounts.json
 # 查询额度并回填到源文件
 python trae-jwt-refresh/scripts/refresh_trae_jwt.py accounts.json --credits --write-back
 
-# 离线回归测试（32 条）
+# 离线回归测试（49 条）
 python trae-jwt-refresh/scripts/test_refresh_trae_jwt.py
+python trae-jwt-refresh/scripts/test_secure_file.py
+python trae-jwt-refresh/scripts/test_trae_get_token.py
 ```
 
 **核心特性：**
@@ -35,6 +37,8 @@ python trae-jwt-refresh/scripts/test_refresh_trae_jwt.py
 - Token 缓存避免多实例互相顶失效；`9074` 错误自动生成新设备号重试
 - `20405`/`10101`/`9074` 自动降级，`20403` 设备不匹配提示人工介入
 - 错误码自动翻译 + 冷却窗口遵守（早窗 12 分钟 / 平时 55 分钟）
+- **凭据零明文输出**：`refreshToken` / 设备私钥不打印到 stdout（只出 sha256 前 8 位指纹），
+  完整凭据写入权限收紧的文件（POSIX `0600`；Windows 去掉 ACL 继承，只留当前用户 / SYSTEM / 管理员）
 
 ### 2. workbuddy-account-pool-export
 
@@ -74,7 +78,10 @@ trae-wb-kit/
 │   │   └── trae_auth.md
 │   └── scripts/
 │       ├── refresh_trae_jwt.py
+│       ├── secure_file.py
 │       ├── test_refresh_trae_jwt.py
+│       ├── test_secure_file.py
+│       ├── test_trae_get_token.py
 │       ├── trae_credit_monitor.py
 │       └── trae_get_token.py
 └── workbuddy-account-pool-export/

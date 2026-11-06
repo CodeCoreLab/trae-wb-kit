@@ -148,11 +148,16 @@ sum(limit - used) 于非耗尽包  ≡  sum(limit) - sum(used)  ≡  total_amoun
 ### 回归测试
 
 ```bash
-python scripts/test_refresh_trae_jwt.py
+python scripts/test_refresh_trae_jwt.py   # 32 用例
+python scripts/test_secure_file.py        # 7 用例（凭据文件权限）
+python scripts/test_trae_get_token.py     # 10 用例（凭据不打印到 stdout）
 ```
 
-32 个用例，全离线（不打网络），覆盖 JWT 解析、格式归一化、缓存路径、错误码翻译、
-额度字段语义（含恒等式证明与反证）、写回幂等与「非对象元素不崩溃」等边界。
+`test_refresh_trae_jwt.py` 全部离线（不打网络），覆盖 JWT 解析、格式归一化、缓存路径、
+错误码翻译、额度字段语义（含恒等式证明与反证）、写回幂等与「非对象元素不崩溃」等边界。
+
+`test_secure_file.py` / `test_trae_get_token.py` 覆盖凭据落盘的权限收紧
+（POSIX 0600 / Windows 去掉 ACL 继承）与「终端只出指纹、不出明文」。
 
 ### 已知缺陷（未修，勿误信）
 
@@ -200,6 +205,28 @@ python scripts/test_refresh_trae_jwt.py
 python scripts/trae_get_token.py --export-keys
 ```
 
+> ⚠️ **凭据不打印到终端**：`refreshToken` / 设备私钥都是长期有效的凭据，明文打到
+> stdout 会进 shell 历史、CI 日志、录屏与聊天记录。脚本改为把完整凭据写进
+> **权限收紧的文件**，终端只显示账号名、UID 与凭据指纹（sha256 前 8 位）。
+>
+> | 模式 | 产出文件（默认 `~/.trae-jwt-refresh/`，可用 `TRAE_EXPORT_DIR` 覆盖） | 内容 |
+> |------|------|------|
+> | `--export-keys` | `trae_device_keys.env` | `TRAE_DEVICE_ID` / `TRAE_MACHINE_ID` / `TRAE_DEVICE_KEY_PEM` / `TRAE_DEVICE_PUB_PEM` |
+> | `--accounts` | `trae_accounts.json` | `TRAE_ACCOUNTS` 的 JSON 数组 |
+> | 默认 | `trae_refresh_token.env` | `TRAE_REFRESH_TOKEN` |
+>
+> 载入方式：
+> ```bash
+> set -a; . ~/.trae-jwt-refresh/trae_device_keys.env; set +a
+> export TRAE_ACCOUNTS="$(cat ~/.trae-jwt-refresh/trae_accounts.json)"
+> ```
+>
+> **权限模型**：POSIX 下文件为 `0600`（仅属主可读写）；Windows 没有 POSIX 权限位，
+> 访问控制完全由 ACL 决定，脚本用 `icacls` 去掉继承项并只保留
+> 「当前用户 + SYSTEM + Administrators」。若 `icacls` 不可用，权限就退化为
+> 目录本身的 ACL —— 此时务必把导出目录放在**用户私有目录**（默认的
+> `~/.trae-jwt-refresh` 即是），不要放在共享盘 / 网盘同步目录。
+
 ### Token 缓存
 
 缓存文件：`.trae_token_cache.json`（脚本同目录；可用 `TRAE_TOKEN_CACHE` 覆盖路径）
@@ -209,6 +236,10 @@ python scripts/trae_get_token.py --export-keys
 - 读取时优先用缓存中有效期更大的 token
 - 避免同一账号在多处同时刷新导致 token 互相顶失效
 - `--no-cache` 只跳过**读取**并禁止写回，**不清空**缓存文件
+
+缓存里是真实凭据，落盘时同样收紧权限（POSIX `0600`；Windows 去掉 ACL 继承、
+只留当前用户 / SYSTEM / 管理员）。写回用户自己的源文件（`--write-back`）时
+**保留原文件权限位**，不会把用户收紧过的权限放宽。
 
 ### 9074 自动换号
 
@@ -254,10 +285,14 @@ See `references/trae_auth.md` for endpoint details, ClientID origins, and troubl
 ## Related Files
 
 - `scripts/refresh_trae_jwt.py` — 主脚本（多格式输入 + 设备证明 + 缓存 + 9074 换号 + 额度查询/回填）
+- `scripts/secure_file.py` — 凭据文件写入与权限收紧（POSIX 0600 / Windows 收紧 ACL）
 - `scripts/test_refresh_trae_jwt.py` — 离线回归测试（32 用例，`python test_refresh_trae_jwt.py`）
-- `scripts/trae_get_token.py` — 从 Trae 客户端提取 token + 导出设备密钥
+- `scripts/test_secure_file.py` — 凭据文件权限回归测试（7 用例）
+- `scripts/test_trae_get_token.py` — 凭据不打印到 stdout 的回归测试（10 用例）
+- `scripts/trae_get_token.py` — 从 Trae 客户端提取 token + 导出设备密钥（凭据写入受限文件，不打印明文）
 - `scripts/trae_credit_monitor.py` — 积分监控（**⚠️ 解析路径已过时，恒返 0**，详见上节）
 - `references/trae_auth.md` — 端点/ClientID/错误码/设备证明原理/排查历史
 
 > 脚本运行时产物（均不入版本库）：`.trae_token_cache.json`（**含真实凭据**）、
-> `.trae_device_ids.json`、`__pycache__/`。
+> `.trae_device_ids.json`、`~/.trae-jwt-refresh/`（导出的凭据文件，权限 0600）、
+> `__pycache__/`。

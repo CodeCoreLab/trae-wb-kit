@@ -40,6 +40,9 @@ import urllib.error
 import urllib.request
 import logging
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import secure_file  # noqa: E402
+
 
 _SECONDS_PER_MINUTE = 60
 _SECONDS_PER_DAY = 86400
@@ -371,10 +374,10 @@ def save_cache(cache):
         d = os.path.dirname(path)
         if d and not os.path.isdir(d):
             os.makedirs(d, exist_ok=True)
-        tmp = path + '.tmp'
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
+        # 缓存里是真实凭据：原子写入 + 权限收紧（POSIX 0600 / Windows 收紧 ACL）
+        ok, err = secure_file.write_private_json(path, cache)
+        if not ok:
+            print("[缓存] 权限收紧失败（文件权限依赖所在目录 ACL）:", err)
     except Exception as e:
         print("[缓存] 写入失败:", e)
 
@@ -448,10 +451,10 @@ def load_device_ids():
 
 def save_device_ids(ids):
     try:
-        tmp = _DEVICE_ID_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(ids, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, _DEVICE_ID_FILE)
+        # 设备号与账号的映射同样属于本地私有状态，落盘时一并收紧权限
+        ok, err = secure_file.write_private_json(_DEVICE_ID_FILE, ids)
+        if not ok:
+            print("[设备号] 权限收紧失败（文件权限依赖所在目录 ACL）:", err)
     except Exception as e:
         print("[设备号] 写入失败:", e)
 
@@ -1165,10 +1168,9 @@ def _apply_credits_writeback(filepath: str, acc_key: str, credits: dict,
     if not changed:
         return False
     try:
-        tmp = filepath + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, filepath)
+        # 源文件含凭据：保留其原有权限位，避免 os.replace 把用户收紧过的权限放宽
+        secure_file.write_text_preserving_mode(
+            filepath, json.dumps(data, ensure_ascii=False, indent=2))
         print("    💾 额度已回填 (%s): %s" % ("+".join(changed), filepath))
         return True
     except OSError as e:
@@ -1230,10 +1232,9 @@ def _write_back_if_match(filepath: str, refreshed_acc: dict):
         break
     if changed:
         try:
-            tmp = filepath + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, filepath)
+            # 源文件含凭据：保留其原有权限位，避免 os.replace 把用户收紧过的权限放宽
+            secure_file.write_text_preserving_mode(
+                filepath, json.dumps(data, ensure_ascii=False, indent=2))
             print("    💾 已写回: %s" % filepath)
         except Exception as e:
             print("    ⚠️ 写回失败: %s" % e)

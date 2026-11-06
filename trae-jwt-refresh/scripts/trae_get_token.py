@@ -9,8 +9,66 @@
   python trae_get_token.py --accounts         # 一键生成 TRAE_ACCOUNTS JSON
   python trae_get_token.py --export-keys      # 导出设备密钥（新版续期必需）
   python trae_get_token.py --storage-path "..." # 指定 storage.json 路径
+
+⚠️ 凭据不打印到 stdout
+   refreshToken / 设备私钥都是长期有效的凭据，明文打到终端会进 shell 历史、
+   CI 日志、录屏与聊天记录。本脚本改为：把完整凭据写进**权限收紧的文件**
+   （POSIX 0600；Windows 去掉 ACL 继承、只留当前用户/SYSTEM/管理员），
+   终端只显示账号名、UID 与凭据指纹（sha256 前 8 位）以及文件路径。
+   导出目录可用环境变量 TRAE_EXPORT_DIR 指定（默认：脚本所在目录）。
 """
 import base64, hashlib, json, os, re, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import secure_file  # noqa: E402
+
+
+# ─── 凭据落盘与指纹 ───
+def fingerprint(value):
+    """凭据指纹：sha256 前 8 位十六进制。只用于核对身份，不泄露明文。"""
+    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()[:8]
+
+
+def export_dir():
+    """凭据导出目录。
+
+    默认放在用户私有目录（POSIX:~/.trae-jwt-refresh；Windows:%USERPROFILE%\\.trae-jwt-refresh），
+    而不是脚本目录——脚本目录可能是 git 仓库或共享目录，不适合放凭据。
+    可用环境变量 TRAE_EXPORT_DIR 覆盖。
+    """
+    env = (os.environ.get("TRAE_EXPORT_DIR") or "").strip()
+    if env:
+        return os.path.abspath(env)
+    return os.path.join(os.path.expanduser("~"), ".trae-jwt-refresh")
+
+
+def write_secret_file(name, content):
+    """把凭据写入导出目录下的受限文件，返回文件路径。"""
+    d = export_dir()
+    if not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+        secure_file.restrict_private(d, is_dir=True)
+    path = os.path.join(d, name)
+    ok, err = secure_file.write_private_text(path, content)
+    if not ok:
+        print("[!] 权限收紧失败（文件权限依赖所在目录 ACL）: %s" % err, file=sys.stderr)
+    return path
+
+
+def device_keys_env(k):
+    """设备密钥的 env 文件内容。
+
+    值用单引号包住：PEM 里的换行被写成字面量 \\n，单引号内 shell 不做反斜杠转义，
+    source 之后 \\n 会被 refresh_trae_jwt 的 _norm_pem 还原成真实换行。
+    """
+    return (
+        "TRAE_DEVICE_ID='%s'\n"
+        "TRAE_MACHINE_ID='%s'\n"
+        "TRAE_DEVICE_KEY_PEM='%s'\n"
+        "TRAE_DEVICE_PUB_PEM='%s'\n"
+    ) % (k["deviceId"], k["machineId"],
+         k["privateKeyPem"].replace("\n", "\\n"),
+         k["publicKeyPem"].replace("\n", "\\n"))
 
 
 
@@ -175,12 +233,13 @@ def export_keys_mode(storage_path=None):
     print("=" * 64)
     print("TRAE_DEVICE_ID=%s" % k["deviceId"])
     print("TRAE_MACHINE_ID=%s" % k["machineId"])
-    print()
-    print("TRAE_DEVICE_KEY_PEM=%s" % k["privateKeyPem"].replace("\n", "\\n"))
-    print()
-    print("TRAE_DEVICE_PUB_PEM=%s" % k["publicKeyPem"].replace("\n", "\\n"))
+    print("私钥指纹(sha256前8位)  : %s" % fingerprint(k["privateKeyPem"]))
+    print("公钥指纹(sha256前8位)  : %s" % fingerprint(k["publicKeyPem"]))
+    path = write_secret_file("trae_device_keys.env", device_keys_env(k))
+    print("完整密钥已写入文件（权限 0600 / Windows 已收紧 ACL）: %s" % path)
     print("=" * 64)
-    print("提示：PEM 里的换行已写成 \\n，直接整行复制即可。")
+    print("提示：私钥不会打印到终端；用 `set -a; . <上面的文件>; set +a` 载入环境变量。")
+    print("      文件里的 PEM 换行已写成 \\n，source 后即为多行字符串。")
     return 0
 
 
@@ -213,13 +272,17 @@ def accounts_mode(storage_path=None):
         return 1
     line = json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
     print("=" * 64)
-    print("TRAE_ACCOUNTS  (共 %d 个账号，整行复制到环境变量)" % len(entries))
+    print("TRAE_ACCOUNTS  (共 %d 个账号)" % len(entries))
     print("=" * 64)
     for i, e in enumerate(entries, 1):
-        print("  %d) %s  UID %s" % (i, e.get("name") or "-", e.get("uid") or "-"))
+        print("  %d) %s  UID %s  refreshToken指纹(sha256前8位) %s"
+              % (i, e.get("name") or "-", e.get("uid") or "-",
+                 fingerprint(e.get("refreshToken", ""))))
+    path = write_secret_file("trae_accounts.json", line)
     print("-" * 64)
-    print(line)
+    print("完整账号 JSON 已写入文件（权限 0600 / Windows 已收紧 ACL）: %s" % path)
     print("=" * 64)
+    print("提示：token 不会打印到终端；用 `export TRAE_ACCOUNTS=\"$(cat %s)\"` 载入。" % path)
     return 0
 
 
@@ -261,6 +324,7 @@ def main():
         if idx + 1 < len(args):
             path = args[idx + 1]
     found = False
+    tokens = []
     for p in [path, find_storage_json()]:
         if not p: continue
         try:
@@ -269,15 +333,21 @@ def main():
             print("[!] 解析失败 %s: %s" % (p, e)); continue
         if not r or not r.get("refreshToken"): continue
         found = True
+        tokens.append(r)
         print("=" * 64)
         print("[来源] %s" % p)
         if r.get("uid"):
             print("[账号] %s (UID %s)" % (r.get("nickname") or "-", r["uid"]))
         print("-" * 64)
-        print("TRAE_REFRESH_TOKEN = %s" % r["refreshToken"])
-        print("=" * 64)
+        print("refreshToken 指纹(sha256前8位): %s" % fingerprint(r["refreshToken"]))
     if not found:
         print("[X] 没找到可用的 refreshToken。请先打开 Trae 客户端并登录一次。")
+        return 0
+    body = "".join("TRAE_REFRESH_TOKEN='%s'\n" % t["refreshToken"] for t in tokens)
+    out = write_secret_file("trae_refresh_token.env", body)
+    print("=" * 64)
+    print("完整 refreshToken 已写入文件（权限 0600 / Windows 已收紧 ACL）: %s" % out)
+    print("提示：token 不会打印到终端；用 `set -a; . %s; set +a` 载入环境变量。" % out)
     return 0
 
 
